@@ -1,0 +1,13 @@
+# For details & more options, see documentation/AppManifests.md in firmware repo
+
+App(
+    appid="dictionary",  # Must be unique
+    name="EngDict",  # Displayed in menus
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="dictionary_app_main",
+    stack_size=2 * 1024,
+    fap_category="Tools",
+    fap_icon="dictionary.png",  # 10x10 1-bit PNG
+    fap_icon_assets="images",  # Image assets to compile for this application
+    fap_file_assets="files", 
+)

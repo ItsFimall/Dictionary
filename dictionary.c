@@ -1,6 +1,4 @@
 // Flipper Zero — English Dictionary App
-// Step 7: History feature implementation.
-
 #include <furi.h>
 #include <furi_hal.h>
 #include <storage/storage.h>
@@ -31,15 +29,16 @@ typedef enum {
     DictionaryViewMainMenu = 0,
     DictionaryViewSearchInput,
     DictionaryViewResult,
-    DictionaryViewHistory, // New view for history
+    DictionaryViewHistory, // View for history
+    DictionaryViewAbout, // New view for About page
 } DictionaryViewId;
 
 typedef enum {
     DictionaryMenuSearch = 0,
-    DictionaryMenuHistory, // History menu item
+    DictionaryMenuHistory,
     DictionaryMenuRandom,
     DictionaryMenuSettings,
-    DictionaryMenuAbout,
+    DictionaryMenuAbout, // About menu item
 } DictionaryMenuId;
 
 // --- Application State Structure ---
@@ -49,7 +48,8 @@ typedef struct {
     Submenu* submenu;
     TextInput* text_input;
     TextBox* text_box;
-    Submenu* history_submenu; // New submenu for history view
+    Submenu* history_submenu; // Submenu for history view
+    TextBox* about_box; // New TextBox for the About page
 
     char* search_buffer;
     size_t search_buffer_size;
@@ -232,6 +232,15 @@ static void dictionary_menu_cb(void* context, uint32_t index) {
         app->current_view = DictionaryViewHistory;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewHistory);
         break;
+    case DictionaryMenuAbout:
+        text_box_reset(app->about_box);
+        text_box_set_font(app->about_box, TextBoxFontText);
+        text_box_set_text(
+            app->about_box,
+            "Author - Lynnet\n\nDictionary File:\n - google-10000-english\n - WordNet\n - CMUdict");
+        app->current_view = DictionaryViewAbout;
+        view_dispatcher_switch_to_view(app->vd, DictionaryViewAbout);
+        break;
     }
 }
 
@@ -286,7 +295,8 @@ static void dictionary_search_done_cb(void* context) {
 static bool dictionary_navigation_event_callback(void* context) {
     DictionaryApp* app = context;
     if(app->current_view == DictionaryViewSearchInput ||
-       app->current_view == DictionaryViewResult || app->current_view == DictionaryViewHistory) {
+       app->current_view == DictionaryViewResult || app->current_view == DictionaryViewHistory ||
+       app->current_view == DictionaryViewAbout) { // Added About view
         app->current_view = DictionaryViewMainMenu;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewMainMenu);
         return true;
@@ -398,6 +408,12 @@ static DictionaryApp* dictionary_app_alloc(void) {
     submenu_set_header(app->submenu, "EngDict " VERSION);
     submenu_add_item(app->submenu, "Search", DictionaryMenuSearch, dictionary_menu_cb, app);
     submenu_add_item(app->submenu, "History", DictionaryMenuHistory, dictionary_menu_cb, app);
+    submenu_add_item(
+        app->submenu,
+        "About",
+        DictionaryMenuAbout,
+        dictionary_menu_cb,
+        app); // Added About menu item
     view_dispatcher_add_view(app->vd, DictionaryViewMainMenu, submenu_get_view(app->submenu));
 
     // Search Input View
@@ -416,6 +432,10 @@ static DictionaryApp* dictionary_app_alloc(void) {
     view_dispatcher_add_view(
         app->vd, DictionaryViewHistory, submenu_get_view(app->history_submenu));
 
+    // About View
+    app->about_box = text_box_alloc();
+    view_dispatcher_add_view(app->vd, DictionaryViewAbout, text_box_get_view(app->about_box));
+
     app->result_text = furi_string_alloc();
     app->current_view = DictionaryViewMainMenu;
 
@@ -428,6 +448,8 @@ static DictionaryApp* dictionary_app_alloc(void) {
 
 static void dictionary_app_free(DictionaryApp* app) {
     if(!app) return;
+    view_dispatcher_remove_view(app->vd, DictionaryViewAbout);
+    text_box_free(app->about_box);
     view_dispatcher_remove_view(app->vd, DictionaryViewHistory);
     submenu_free(app->history_submenu);
     view_dispatcher_remove_view(app->vd, DictionaryViewResult);

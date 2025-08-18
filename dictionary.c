@@ -1,4 +1,6 @@
-// Flipper Zero — English Dictionary App
+// Flipper Zero — English Dictionary App (with Random feature)
+// Author: Lynnet (+ Random by ChatGPT)
+
 #include <furi.h>
 #include <furi_hal.h>
 #include <storage/storage.h>
@@ -30,14 +32,14 @@ typedef enum {
     DictionaryViewSearchInput,
     DictionaryViewResult,
     DictionaryViewHistory, // View for history
-    DictionaryViewAbout, // New view for About page
+    DictionaryViewAbout, // View for About page
 } DictionaryViewId;
 
 typedef enum {
     DictionaryMenuSearch = 0,
     DictionaryMenuHistory,
     DictionaryMenuRandom,
-    DictionaryMenuSettings,
+    DictionaryMenuSettings, // (reserved)
     DictionaryMenuAbout, // About menu item
 } DictionaryMenuId;
 
@@ -49,7 +51,7 @@ typedef struct {
     TextInput* text_input;
     TextBox* text_box;
     Submenu* history_submenu; // Submenu for history view
-    TextBox* about_box; // New TextBox for the About page
+    TextBox* about_box; // TextBox for the About page
 
     char* search_buffer;
     size_t search_buffer_size;
@@ -70,6 +72,8 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
 static void dictionary_app_save_history(DictionaryApp* app);
 static void dictionary_history_menu_cb(void* context, uint32_t index);
 static void dictionary_app_add_to_history(DictionaryApp* app, const char* word);
+// NEW: random-word picker
+static bool dictionary_app_random_word(DictionaryApp* app);
 
 // Helper: split phonetic and defs, then format output
 static void format_result_with_phonetic(FuriString* out, const char* word, const char* raw) {
@@ -222,6 +226,7 @@ static void dictionary_menu_cb(void* context, uint32_t index) {
         app->current_view = DictionaryViewSearchInput;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewSearchInput);
         break;
+
     case DictionaryMenuHistory:
         submenu_reset(app->history_submenu);
         submenu_set_header(app->history_submenu, "Search History");
@@ -232,6 +237,33 @@ static void dictionary_menu_cb(void* context, uint32_t index) {
         app->current_view = DictionaryViewHistory;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewHistory);
         break;
+
+    case DictionaryMenuRandom: {
+        bool found = dictionary_app_random_word(app);
+
+        text_box_reset(app->text_box);
+        text_box_set_font(app->text_box, TextBoxFontText);
+
+        if(found) {
+            text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
+            // 从首行提取真实单词（避免把 [phonetic] 带进历史）
+            const char* cstr = furi_string_get_cstr(app->result_text);
+            char word[MAX_WORD_LENGTH] = {0};
+            size_t i = 0;
+            while(cstr[i] && cstr[i] != '\n' && cstr[i] != ' ' && i < MAX_WORD_LENGTH - 1) {
+                word[i] = cstr[i];
+                i++;
+            }
+            dictionary_app_add_to_history(app, word);
+        } else {
+            furi_string_set(app->result_text, "Error: Failed to pick a random word.");
+            text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
+        }
+
+        app->current_view = DictionaryViewResult;
+        view_dispatcher_switch_to_view(app->vd, DictionaryViewResult);
+    } break;
+
     case DictionaryMenuAbout:
         text_box_reset(app->about_box);
         text_box_set_font(app->about_box, TextBoxFontText);
@@ -296,7 +328,7 @@ static bool dictionary_navigation_event_callback(void* context) {
     DictionaryApp* app = context;
     if(app->current_view == DictionaryViewSearchInput ||
        app->current_view == DictionaryViewResult || app->current_view == DictionaryViewHistory ||
-       app->current_view == DictionaryViewAbout) { // Added About view
+       app->current_view == DictionaryViewAbout) {
         app->current_view = DictionaryViewMainMenu;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewMainMenu);
         return true;
@@ -394,6 +426,105 @@ cleanup:
     return found;
 }
 
+// --- Random Word Picker ---
+static bool dictionary_app_random_word(DictionaryApp* app) {
+    bool ok = false;
+    furi_string_reset(app->result_text);
+
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* idx_file = storage_file_alloc(storage);
+    File* dat_file = storage_file_alloc(storage);
+
+    if(!storage_file_open(idx_file, DICTIONARY_IDX_PATH, FSAM_READ, FSOM_OPEN_EXISTING) ||
+       !storage_file_open(dat_file, DICTIONARY_DAT_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        furi_string_set(app->result_text, "Error: Dictionary files not found on SD card.");
+        goto cleanup;
+    }
+
+    // First pass: count records
+    uint32_t count = 0;
+    storage_file_seek(idx_file, 0, true);
+    while(true) {
+        uint16_t key_len;
+        if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) break;
+        if(!storage_file_seek(idx_file, (uint32_t)key_len + 6, false)) break; // skip key + 4 + 2
+        count++;
+    }
+
+    if(count == 0) {
+        furi_string_set(app->result_text, "Error: Dictionary index is empty.");
+        goto cleanup;
+    }
+
+    // Generate pseudo-random number (seeded by tick)
+    uint32_t seed = furi_get_tick();
+    srand((unsigned int)(seed ^ (seed << 13) ^ (seed >> 7)));
+    uint32_t r = ((uint32_t)rand() << 16) ^ (uint32_t)rand();
+    uint32_t target = r % count;
+
+    // Second pass: seek to target
+    storage_file_seek(idx_file, 0, true);
+    for(uint32_t i = 0; i < target; i++) {
+        uint16_t key_len_skip;
+        if(storage_file_read(idx_file, &key_len_skip, sizeof(key_len_skip)) !=
+               sizeof(key_len_skip) ||
+           !storage_file_seek(idx_file, (uint32_t)key_len_skip + 6, false)) {
+            furi_string_set(app->result_text, "Error: Random seek failed.");
+            goto cleanup;
+        }
+    }
+
+    // Read the target record
+    uint16_t key_len;
+    if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) {
+        furi_string_set(app->result_text, "Error: Read key length failed.");
+        goto cleanup;
+    }
+
+    char key_buffer[MAX_WORD_LENGTH];
+    if(key_len >= sizeof(key_buffer)) key_len = sizeof(key_buffer) - 1;
+    if(storage_file_read(idx_file, key_buffer, key_len) != key_len) {
+        furi_string_set(app->result_text, "Error: Read key failed.");
+        goto cleanup;
+    }
+    key_buffer[key_len] = '\0';
+
+    uint32_t offset;
+    uint16_t length;
+    if(storage_file_read(idx_file, &offset, sizeof(offset)) != sizeof(offset) ||
+       storage_file_read(idx_file, &length, sizeof(length)) != sizeof(length)) {
+        furi_string_set(app->result_text, "Error: Read pointer failed.");
+        goto cleanup;
+    }
+
+    // Fetch definition from .dat
+    storage_file_seek(dat_file, offset, true);
+    char* def_buffer = malloc((size_t)length + 1);
+    if(!def_buffer) {
+        furi_string_set(app->result_text, "Error: Out of memory.");
+        goto cleanup;
+    }
+    if(storage_file_read(dat_file, def_buffer, length) != length) {
+        free(def_buffer);
+        furi_string_set(app->result_text, "Error: Read definition failed.");
+        goto cleanup;
+    }
+    def_buffer[length] = '\0';
+
+    // Format nicely
+    format_result_with_phonetic(app->result_text, key_buffer, def_buffer);
+    free(def_buffer);
+    ok = true;
+
+cleanup:
+    storage_file_close(idx_file);
+    storage_file_free(idx_file);
+    storage_file_close(dat_file);
+    storage_file_free(dat_file);
+    furi_record_close(RECORD_STORAGE);
+    return ok;
+}
+
 // --- App Allocation and Freeing ---
 
 static DictionaryApp* dictionary_app_alloc(void) {
@@ -408,12 +539,10 @@ static DictionaryApp* dictionary_app_alloc(void) {
     submenu_set_header(app->submenu, "EngDict " VERSION);
     submenu_add_item(app->submenu, "Search", DictionaryMenuSearch, dictionary_menu_cb, app);
     submenu_add_item(app->submenu, "History", DictionaryMenuHistory, dictionary_menu_cb, app);
-    submenu_add_item(
-        app->submenu,
-        "About",
-        DictionaryMenuAbout,
-        dictionary_menu_cb,
-        app); // Added About menu item
+    // Random item
+    submenu_add_item(app->submenu, "Random", DictionaryMenuRandom, dictionary_menu_cb, app);
+    // About item
+    submenu_add_item(app->submenu, "About", DictionaryMenuAbout, dictionary_menu_cb, app);
     view_dispatcher_add_view(app->vd, DictionaryViewMainMenu, submenu_get_view(app->submenu));
 
     // Search Input View

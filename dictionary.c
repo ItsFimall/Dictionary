@@ -1,5 +1,5 @@
 // Flipper Zero — English Dictionary App
-// Step 6.5: Back navigation using simple state tracking (no unavailable API).
+// Step 7: History feature implementation.
 
 #include <furi.h>
 #include <furi_hal.h>
@@ -13,34 +13,43 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <toolbox/stream/file_stream.h>
+#include <toolbox/stream/buffered_file_stream.h>
 
 #define APP_NAME "Dictionary"
-#define VERSION  "SearchPlus"
+#define VERSION  "V1"
 
 #define DICTIONARY_APP_ASSETS_PATH EXT_PATH("apps_assets/dictionary")
 #define DICTIONARY_IDX_PATH        DICTIONARY_APP_ASSETS_PATH "/engdict.idx"
 #define DICTIONARY_DAT_PATH        DICTIONARY_APP_ASSETS_PATH "/engdict.dat"
+#define DICTIONARY_HISTORY_PATH    DICTIONARY_APP_ASSETS_PATH "/history.txt" // History file path
+#define MAX_HISTORY_ITEMS          10
+#define MAX_WORD_LENGTH            50
 
+// --- Enums for Views and Menu Items ---
 typedef enum {
     DictionaryViewMainMenu = 0,
     DictionaryViewSearchInput,
     DictionaryViewResult,
+    DictionaryViewHistory, // New view for history
 } DictionaryViewId;
 
 typedef enum {
     DictionaryMenuSearch = 0,
+    DictionaryMenuHistory, // History menu item
     DictionaryMenuRandom,
-    DictionaryMenuHistory,
     DictionaryMenuSettings,
     DictionaryMenuAbout,
 } DictionaryMenuId;
 
+// --- Application State Structure ---
 typedef struct {
     Gui* gui;
     ViewDispatcher* vd;
     Submenu* submenu;
     TextInput* text_input;
     TextBox* text_box;
+    Submenu* history_submenu; // New submenu for history view
 
     char* search_buffer;
     size_t search_buffer_size;
@@ -48,11 +57,19 @@ typedef struct {
     FuriString* result_text;
 
     uint32_t current_view;
+
+    // History data
+    char history_words[MAX_HISTORY_ITEMS][MAX_WORD_LENGTH];
+    uint8_t history_count;
 } DictionaryApp;
 
+// --- Forward Declarations ---
 static void dictionary_search_done_cb(void* context);
 static bool dictionary_navigation_event_callback(void* context);
 static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_find);
+static void dictionary_app_save_history(DictionaryApp* app);
+static void dictionary_history_menu_cb(void* context, uint32_t index);
+static void dictionary_app_add_to_history(DictionaryApp* app, const char* word);
 
 // Helper: split phonetic and defs, then format output
 static void format_result_with_phonetic(FuriString* out, const char* word, const char* raw) {
@@ -105,6 +122,90 @@ static void format_result_with_phonetic(FuriString* out, const char* word, const
     free(buf);
 }
 
+// --- History Management Functions ---
+
+static void dictionary_app_load_history(DictionaryApp* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    Stream* file_stream = buffered_file_stream_alloc(storage);
+    app->history_count = 0;
+
+    if(buffered_file_stream_open(
+           file_stream, DICTIONARY_HISTORY_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        FuriString* line = furi_string_alloc();
+        while(app->history_count < MAX_HISTORY_ITEMS && stream_read_line(file_stream, line)) {
+            furi_string_trim(line);
+            if(furi_string_size(line) > 0) {
+                strncpy(
+                    app->history_words[app->history_count],
+                    furi_string_get_cstr(line),
+                    MAX_WORD_LENGTH - 1);
+                app->history_words[app->history_count][MAX_WORD_LENGTH - 1] = '\0';
+                app->history_count++;
+            }
+        }
+        furi_string_free(line);
+    }
+
+    buffered_file_stream_close(file_stream);
+    stream_free(file_stream);
+    furi_record_close(RECORD_STORAGE);
+}
+
+static void dictionary_app_save_history(DictionaryApp* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    Stream* file_stream = buffered_file_stream_alloc(storage);
+
+    if(buffered_file_stream_open(
+           file_stream, DICTIONARY_HISTORY_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        for(uint8_t i = 0; i < app->history_count; ++i) {
+            stream_write_format(file_stream, "%s\n", app->history_words[i]);
+        }
+    }
+
+    buffered_file_stream_close(file_stream);
+    stream_free(file_stream);
+    furi_record_close(RECORD_STORAGE);
+}
+
+static void dictionary_app_add_to_history(DictionaryApp* app, const char* word) {
+    if(!word || strlen(word) == 0) return;
+
+    // Check for duplicates and remove if found
+    int found_index = -1;
+    for(uint8_t i = 0; i < app->history_count; ++i) {
+        if(strcasecmp(app->history_words[i], word) == 0) {
+            found_index = i;
+            break;
+        }
+    }
+
+    if(found_index != -1) {
+        // If found, move it to the top (most recent)
+        char temp[MAX_WORD_LENGTH];
+        strncpy(temp, app->history_words[found_index], MAX_WORD_LENGTH);
+        for(int i = found_index; i > 0; --i) {
+            strncpy(app->history_words[i], app->history_words[i - 1], MAX_WORD_LENGTH);
+        }
+        strncpy(app->history_words[0], temp, MAX_WORD_LENGTH);
+    } else {
+        // If not found, add it to the top
+        if(app->history_count < MAX_HISTORY_ITEMS) {
+            app->history_count++;
+        }
+        // Shift existing items down
+        for(int i = app->history_count - 1; i > 0; --i) {
+            strncpy(app->history_words[i], app->history_words[i - 1], MAX_WORD_LENGTH);
+        }
+        // Add the new word at the top
+        strncpy(app->history_words[0], word, MAX_WORD_LENGTH - 1);
+        app->history_words[0][MAX_WORD_LENGTH - 1] = '\0';
+    }
+
+    dictionary_app_save_history(app);
+}
+
+// --- UI Callback Functions ---
+
 static void dictionary_menu_cb(void* context, uint32_t index) {
     DictionaryApp* app = context;
     switch(index) {
@@ -121,6 +222,39 @@ static void dictionary_menu_cb(void* context, uint32_t index) {
         app->current_view = DictionaryViewSearchInput;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewSearchInput);
         break;
+    case DictionaryMenuHistory:
+        submenu_reset(app->history_submenu);
+        submenu_set_header(app->history_submenu, "Search History");
+        for(uint8_t i = 0; i < app->history_count; ++i) {
+            submenu_add_item(
+                app->history_submenu, app->history_words[i], i, dictionary_history_menu_cb, app);
+        }
+        app->current_view = DictionaryViewHistory;
+        view_dispatcher_switch_to_view(app->vd, DictionaryViewHistory);
+        break;
+    }
+}
+
+static void dictionary_history_menu_cb(void* context, uint32_t index) {
+    DictionaryApp* app = context;
+    if(index < app->history_count) {
+        // Perform search with the selected history word
+        bool found = dictionary_app_search_word(app, app->history_words[index]);
+        text_box_reset(app->text_box);
+        text_box_set_font(app->text_box, TextBoxFontText);
+
+        if(found) {
+            text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
+            // Add to history again to move it to the top
+            dictionary_app_add_to_history(app, app->history_words[index]);
+        } else {
+            furi_string_printf(
+                app->result_text, "Word not found:\n\"%s\"", app->history_words[index]);
+            text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
+        }
+
+        app->current_view = DictionaryViewResult;
+        view_dispatcher_switch_to_view(app->vd, DictionaryViewResult);
     }
 }
 
@@ -137,6 +271,8 @@ static void dictionary_search_done_cb(void* context) {
 
     if(found) {
         text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
+        // Add successful search to history
+        dictionary_app_add_to_history(app, app->search_buffer);
     } else {
         furi_string_printf(app->result_text, "Word not found:\n\"%s\"", app->search_buffer);
         text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
@@ -150,7 +286,7 @@ static void dictionary_search_done_cb(void* context) {
 static bool dictionary_navigation_event_callback(void* context) {
     DictionaryApp* app = context;
     if(app->current_view == DictionaryViewSearchInput ||
-       app->current_view == DictionaryViewResult) {
+       app->current_view == DictionaryViewResult || app->current_view == DictionaryViewHistory) {
         app->current_view = DictionaryViewMainMenu;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewMainMenu);
         return true;
@@ -158,6 +294,7 @@ static bool dictionary_navigation_event_callback(void* context) {
     return false;
 }
 
+// --- Core Search Logic ---
 static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_find) {
     bool found = false;
     furi_string_reset(app->result_text);
@@ -195,7 +332,7 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
         uint16_t key_len;
         if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) break;
 
-        char key_buffer[50];
+        char key_buffer[MAX_WORD_LENGTH];
         if(key_len >= sizeof(key_buffer)) key_len = sizeof(key_buffer) - 1;
         if(storage_file_read(idx_file, key_buffer, key_len) != key_len) break;
         key_buffer[key_len] = '\0';
@@ -247,6 +384,8 @@ cleanup:
     return found;
 }
 
+// --- App Allocation and Freeing ---
+
 static DictionaryApp* dictionary_app_alloc(void) {
     DictionaryApp* app = malloc(sizeof(DictionaryApp));
     app->gui = furi_record_open(RECORD_GUI);
@@ -254,22 +393,34 @@ static DictionaryApp* dictionary_app_alloc(void) {
     view_dispatcher_set_navigation_event_callback(app->vd, dictionary_navigation_event_callback);
     view_dispatcher_set_event_callback_context(app->vd, app);
 
+    // Main Menu
     app->submenu = submenu_alloc();
     submenu_set_header(app->submenu, "EngDict " VERSION);
     submenu_add_item(app->submenu, "Search", DictionaryMenuSearch, dictionary_menu_cb, app);
+    submenu_add_item(app->submenu, "History", DictionaryMenuHistory, dictionary_menu_cb, app);
     view_dispatcher_add_view(app->vd, DictionaryViewMainMenu, submenu_get_view(app->submenu));
 
+    // Search Input View
     app->text_input = text_input_alloc();
     view_dispatcher_add_view(
         app->vd, DictionaryViewSearchInput, text_input_get_view(app->text_input));
-    app->search_buffer_size = 50;
+    app->search_buffer_size = MAX_WORD_LENGTH;
     app->search_buffer = malloc(app->search_buffer_size);
 
+    // Result View
     app->text_box = text_box_alloc();
     view_dispatcher_add_view(app->vd, DictionaryViewResult, text_box_get_view(app->text_box));
 
+    // History View
+    app->history_submenu = submenu_alloc();
+    view_dispatcher_add_view(
+        app->vd, DictionaryViewHistory, submenu_get_view(app->history_submenu));
+
     app->result_text = furi_string_alloc();
     app->current_view = DictionaryViewMainMenu;
+
+    // Load history from file
+    dictionary_app_load_history(app);
 
     view_dispatcher_attach_to_gui(app->vd, app->gui, ViewDispatcherTypeFullscreen);
     return app;
@@ -277,6 +428,8 @@ static DictionaryApp* dictionary_app_alloc(void) {
 
 static void dictionary_app_free(DictionaryApp* app) {
     if(!app) return;
+    view_dispatcher_remove_view(app->vd, DictionaryViewHistory);
+    submenu_free(app->history_submenu);
     view_dispatcher_remove_view(app->vd, DictionaryViewResult);
     text_box_free(app->text_box);
     furi_string_free(app->result_text);
@@ -290,6 +443,7 @@ static void dictionary_app_free(DictionaryApp* app) {
     free(app);
 }
 
+// --- Main Application Entry Point ---
 int32_t dictionary_app_main(void* p) {
     UNUSED(p);
     DictionaryApp* app = dictionary_app_alloc();

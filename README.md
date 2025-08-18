@@ -1,5 +1,5 @@
 # Flipper Zero 英语词典应用
-[英文版 (English Version)](https://github.com/ItsFimall/Dictionary/README_en.md)
+[英文版 (English Version)](https://github.com/Lynn3t/Dictionary/README_en.md)
 这是一款为 Flipper Zero 设计的离线英语词典应用程序。
 
 ## 1. 功能
@@ -19,7 +19,7 @@
 1. **克隆本项目**
 
    ```
-   git clone https://github.com/ItsFimall/Dictionary.git
+   git clone https://github.com/Lynn3t/Dictionary.git
    cd Dictionary
    ```
 

@@ -2,7 +2,7 @@
 
 This is an offline English dictionary application designed for the Flipper Zero.
 
-[中文版 (Chinese Version)](https://github.com/ItsFimall/Dictionary/README.md)
+[中文版 (Chinese Version)](https://github.com/Lynn3t/Dictionary/README.md)
 
 ## 1. Features
 
@@ -21,7 +21,7 @@ A **Python3** environment is required for the build and installation process. Pl
 1. **Clone this repository**
 
    ```
-   git clone https://github.com/ItsFimall/Dictionary.git
+   git clone https://github.com/Lynn3t/Dictionary.git
    cd Dictionary
    ```
 

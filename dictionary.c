@@ -1,5 +1,5 @@
 // Flipper Zero — English Dictionary App
-// Step 6.0: Final test - Displaying plain text only to isolate the lockup issue.
+// Step 6.5: Back navigation using simple state tracking (no unavailable API).
 
 #include <furi.h>
 #include <furi_hal.h>
@@ -10,24 +10,23 @@
 #include <gui/modules/text_box.h>
 #include <gui/view_dispatcher.h>
 #include <input/input.h>
-#include <ctype.h> // Required for the isspace() function
+#include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define APP_NAME "Dictionary"
-#define VERSION  "SearchCore"
+#define VERSION  "SearchPlus"
 
-// The path to our dictionary files on the SD card.
 #define DICTIONARY_APP_ASSETS_PATH EXT_PATH("apps_assets/dictionary")
 #define DICTIONARY_IDX_PATH        DICTIONARY_APP_ASSETS_PATH "/engdict.idx"
 #define DICTIONARY_DAT_PATH        DICTIONARY_APP_ASSETS_PATH "/engdict.dat"
 
-// An enumeration for the different views in our application.
 typedef enum {
     DictionaryViewMainMenu = 0,
     DictionaryViewSearchInput,
     DictionaryViewResult,
 } DictionaryViewId;
 
-// An enumeration for the menu items.
 typedef enum {
     DictionaryMenuSearch = 0,
     DictionaryMenuRandom,
@@ -36,7 +35,6 @@ typedef enum {
     DictionaryMenuAbout,
 } DictionaryMenuId;
 
-// The main application structure.
 typedef struct {
     Gui* gui;
     ViewDispatcher* vd;
@@ -48,17 +46,67 @@ typedef struct {
     size_t search_buffer_size;
 
     FuriString* result_text;
+
+    uint32_t current_view;
 } DictionaryApp;
 
-// Forward declarations for our callback functions.
 static void dictionary_search_done_cb(void* context);
 static bool dictionary_navigation_event_callback(void* context);
 static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_find);
 
-// Main menu callback: handles actions when a menu item is selected.
+// Helper: split phonetic and defs, then format output
+static void format_result_with_phonetic(FuriString* out, const char* word, const char* raw) {
+    furi_string_reset(out);
+    if(!raw) return;
+
+    const char* defs = raw;
+    if(raw[0] == '[') {
+        const char* closing = strchr(raw, ']');
+        if(closing) {
+            size_t phon_len = closing - raw + 1;
+            furi_string_cat_printf(out, "%s %.*s", word, (int)phon_len, raw);
+            furi_string_push_back(out, '\n');
+            defs = closing + 1;
+            while(*defs && isspace((unsigned char)*defs))
+                defs++;
+        }
+    } else {
+        furi_string_cat_printf(out, "%s", word);
+        furi_string_push_back(out, '\n');
+    }
+
+    size_t raw_len = strlen(defs);
+    char* buf = malloc(raw_len + 1);
+    if(!buf) {
+        furi_string_cat(out, defs);
+        return;
+    }
+    memcpy(buf, defs, raw_len + 1);
+
+    unsigned count = 0;
+    char* token = strtok(buf, ";");
+    while(token) {
+        while(*token && isspace((unsigned char)*token))
+            token++;
+        size_t tlen = strlen(token);
+        while(tlen > 0 && isspace((unsigned char)token[tlen - 1])) {
+            token[--tlen] = '\0';
+        }
+        if(tlen > 0) {
+            furi_string_cat_printf(out, "%u. %s\n", ++count, token);
+        }
+        token = strtok(NULL, ";");
+    }
+
+    if(count == 0) {
+        furi_string_cat(out, defs);
+    }
+
+    free(buf);
+}
+
 static void dictionary_menu_cb(void* context, uint32_t index) {
     DictionaryApp* app = context;
-
     switch(index) {
     case DictionaryMenuSearch:
         memset(app->search_buffer, 0, app->search_buffer_size);
@@ -70,48 +118,46 @@ static void dictionary_menu_cb(void* context, uint32_t index) {
             app->search_buffer,
             app->search_buffer_size,
             true);
+        app->current_view = DictionaryViewSearchInput;
         view_dispatcher_switch_to_view(app->vd, DictionaryViewSearchInput);
         break;
-        // ... other cases remain the same for now
     }
 }
 
-// Callback for when text input is complete.
 static void dictionary_search_done_cb(void* context) {
     DictionaryApp* app = context;
-
-    // Trim trailing whitespace from the search buffer
     size_t len = strlen(app->search_buffer);
     while(len > 0 && isspace((unsigned char)app->search_buffer[len - 1])) {
         app->search_buffer[--len] = '\0';
     }
 
-    // Perform the search with the cleaned string
     bool found = dictionary_app_search_word(app, app->search_buffer);
-
-    // Prepare the result view
     text_box_reset(app->text_box);
     text_box_set_font(app->text_box, TextBoxFontText);
 
     if(found) {
-        // --- FIX: Display plain text ONLY. No formatting, no concatenation. ---
         text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
     } else {
         furi_string_printf(app->result_text, "Word not found:\n\"%s\"", app->search_buffer);
         text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
     }
 
-    // Switch to the result view
+    app->current_view = DictionaryViewResult;
     view_dispatcher_switch_to_view(app->vd, DictionaryViewResult);
 }
 
-// A generic navigation event callback.
+// Back button handling: go back to previous view instead of exiting
 static bool dictionary_navigation_event_callback(void* context) {
-    UNUSED(context);
-    return false; // Let the view dispatcher handle the back button
+    DictionaryApp* app = context;
+    if(app->current_view == DictionaryViewSearchInput ||
+       app->current_view == DictionaryViewResult) {
+        app->current_view = DictionaryViewMainMenu;
+        view_dispatcher_switch_to_view(app->vd, DictionaryViewMainMenu);
+        return true;
+    }
+    return false;
 }
 
-// The core search logic.
 static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_find) {
     bool found = false;
     furi_string_reset(app->result_text);
@@ -131,7 +177,6 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
 
     while(low < high) {
         uint64_t mid = low + (high - low) / 2;
-
         storage_file_seek(idx_file, low, true);
         uint64_t pivot_pos = low;
 
@@ -148,37 +193,37 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
         storage_file_seek(idx_file, pivot_pos, true);
 
         uint16_t key_len;
-        if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) {
-            break;
-        }
+        if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) break;
 
         char key_buffer[50];
-        if(key_len >= sizeof(key_buffer)) {
-            key_len = sizeof(key_buffer) - 1;
-        }
-
-        if(storage_file_read(idx_file, key_buffer, key_len) != key_len) {
-            break;
-        }
+        if(key_len >= sizeof(key_buffer)) key_len = sizeof(key_buffer) - 1;
+        if(storage_file_read(idx_file, key_buffer, key_len) != key_len) break;
         key_buffer[key_len] = '\0';
 
         int cmp = strcasecmp(word_to_find, key_buffer);
-
         if(cmp == 0) {
             uint32_t offset;
             uint16_t length;
             if(storage_file_read(idx_file, &offset, sizeof(offset)) != sizeof(offset) ||
-               storage_file_read(idx_file, &length, sizeof(length)) != sizeof(length)) {
+               storage_file_read(idx_file, &length, sizeof(length)) != sizeof(length))
                 break;
-            }
 
             storage_file_seek(dat_file, offset, true);
             char* def_buffer = malloc(length + 1);
-            storage_file_read(dat_file, def_buffer, length);
+            if(!def_buffer) {
+                furi_string_set(
+                    app->result_text, "Error: Out of memory while reading definition.");
+                goto cleanup;
+            }
+            if(storage_file_read(dat_file, def_buffer, length) != length) {
+                free(def_buffer);
+                furi_string_set(app->result_text, "Error: Failed to read definition data.");
+                goto cleanup;
+            }
             def_buffer[length] = '\0';
-            furi_string_set(app->result_text, def_buffer);
-            free(def_buffer);
 
+            format_result_with_phonetic(app->result_text, key_buffer, def_buffer);
+            free(def_buffer);
             found = true;
             goto cleanup;
         } else if(cmp < 0) {
@@ -190,7 +235,7 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
 
 search_failed:
     if(!found) {
-        // The result text will be set in the calling function
+        // leave result text empty, will be set by caller
     }
 
 cleanup:
@@ -202,60 +247,49 @@ cleanup:
     return found;
 }
 
-// Allocate and initialize the application.
 static DictionaryApp* dictionary_app_alloc(void) {
     DictionaryApp* app = malloc(sizeof(DictionaryApp));
     app->gui = furi_record_open(RECORD_GUI);
     app->vd = view_dispatcher_alloc();
-
     view_dispatcher_set_navigation_event_callback(app->vd, dictionary_navigation_event_callback);
     view_dispatcher_set_event_callback_context(app->vd, app);
 
-    // --- Submenu (Main Menu) Setup ---
     app->submenu = submenu_alloc();
     submenu_set_header(app->submenu, "EngDict " VERSION);
     submenu_add_item(app->submenu, "Search", DictionaryMenuSearch, dictionary_menu_cb, app);
-    // ... other items
     view_dispatcher_add_view(app->vd, DictionaryViewMainMenu, submenu_get_view(app->submenu));
 
-    // --- TextInput (Search Input) Setup ---
     app->text_input = text_input_alloc();
     view_dispatcher_add_view(
         app->vd, DictionaryViewSearchInput, text_input_get_view(app->text_input));
     app->search_buffer_size = 50;
     app->search_buffer = malloc(app->search_buffer_size);
 
-    // --- TextBox (Result Display) Setup ---
     app->text_box = text_box_alloc();
     view_dispatcher_add_view(app->vd, DictionaryViewResult, text_box_get_view(app->text_box));
 
     app->result_text = furi_string_alloc();
+    app->current_view = DictionaryViewMainMenu;
 
     view_dispatcher_attach_to_gui(app->vd, app->gui, ViewDispatcherTypeFullscreen);
     return app;
 }
 
-// Free all allocated resources.
 static void dictionary_app_free(DictionaryApp* app) {
     if(!app) return;
-
     view_dispatcher_remove_view(app->vd, DictionaryViewResult);
     text_box_free(app->text_box);
     furi_string_free(app->result_text);
-
     view_dispatcher_remove_view(app->vd, DictionaryViewSearchInput);
     text_input_free(app->text_input);
     free(app->search_buffer);
-
     view_dispatcher_remove_view(app->vd, DictionaryViewMainMenu);
     submenu_free(app->submenu);
-
     view_dispatcher_free(app->vd);
     furi_record_close(RECORD_GUI);
     free(app);
 }
 
-// Application entry point.
 int32_t dictionary_app_main(void* p) {
     UNUSED(p);
     DictionaryApp* app = dictionary_app_alloc();

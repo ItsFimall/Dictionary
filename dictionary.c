@@ -1,5 +1,5 @@
 // Flipper Zero — English Dictionary App
-// Step 2.6: Fix search by trimming trailing whitespace from user input.
+// Step 6.0: Final test - Displaying plain text only to isolate the lockup issue.
 
 #include <furi.h>
 #include <furi_hal.h>
@@ -13,7 +13,7 @@
 #include <ctype.h> // Required for the isspace() function
 
 #define APP_NAME "Dictionary"
-#define VERSION  "SearchFuncDBG"
+#define VERSION  "SearchCore"
 
 // The path to our dictionary files on the SD card.
 #define DICTIONARY_APP_ASSETS_PATH EXT_PATH("apps_assets/dictionary")
@@ -80,16 +80,11 @@ static void dictionary_menu_cb(void* context, uint32_t index) {
 static void dictionary_search_done_cb(void* context) {
     DictionaryApp* app = context;
 
-    // --- FIX: Trim trailing whitespace from the search buffer ---
-    // This is the crucial fix. The TextInput view can sometimes add a space
-    // at the end of the input, causing all search comparisons to fail.
+    // Trim trailing whitespace from the search buffer
     size_t len = strlen(app->search_buffer);
     while(len > 0 && isspace((unsigned char)app->search_buffer[len - 1])) {
         app->search_buffer[--len] = '\0';
     }
-    // --- End of FIX ---
-
-    FURI_LOG_I(APP_NAME, "Trimmed word to search: '%s'", app->search_buffer);
 
     // Perform the search with the cleaned string
     bool found = dictionary_app_search_word(app, app->search_buffer);
@@ -99,15 +94,10 @@ static void dictionary_search_done_cb(void* context) {
     text_box_set_font(app->text_box, TextBoxFontText);
 
     if(found) {
-        FuriString* display_text = furi_string_alloc();
-        furi_string_printf(
-            display_text,
-            "\e#%s\e#\n\n%s",
-            app->search_buffer,
-            furi_string_get_cstr(app->result_text));
-        text_box_set_text(app->text_box, furi_string_get_cstr(display_text));
-        furi_string_free(display_text);
+        // --- FIX: Display plain text ONLY. No formatting, no concatenation. ---
+        text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
     } else {
+        furi_string_printf(app->result_text, "Word not found:\n\"%s\"", app->search_buffer);
         text_box_set_text(app->text_box, furi_string_get_cstr(app->result_text));
     }
 
@@ -132,7 +122,6 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
 
     if(!storage_file_open(idx_file, DICTIONARY_IDX_PATH, FSAM_READ, FSOM_OPEN_EXISTING) ||
        !storage_file_open(dat_file, DICTIONARY_DAT_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        FURI_LOG_E(APP_NAME, "Failed to open dictionary files");
         furi_string_set(app->result_text, "Error: Dictionary files not found on SD card.");
         goto cleanup;
     }
@@ -142,36 +131,35 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
 
     while(low < high) {
         uint64_t mid = low + (high - low) / 2;
-        storage_file_seek(idx_file, mid, true);
 
-        // This complex block seeks backwards from the midpoint to find the start
-        // of the previous record, ensuring we start our read from a valid boundary.
-        uint16_t key_len_check;
-        while(storage_file_tell(idx_file) > low) {
-            uint64_t current_pos = storage_file_tell(idx_file);
-            if(current_pos == 0) break;
-            storage_file_seek(idx_file, current_pos - 1, true);
+        storage_file_seek(idx_file, low, true);
+        uint64_t pivot_pos = low;
 
-            if(storage_file_read(idx_file, &key_len_check, sizeof(key_len_check)) !=
-               sizeof(key_len_check))
-                break;
-
-            if(storage_file_tell(idx_file) + key_len_check + 6 <= file_size) {
-                uint64_t recheck_pos = storage_file_tell(idx_file);
-                if(recheck_pos < 2) break;
-                storage_file_seek(idx_file, recheck_pos - 2, true);
-                break;
+        while(storage_file_tell(idx_file) < mid) {
+            pivot_pos = storage_file_tell(idx_file);
+            uint16_t temp_len;
+            if(storage_file_read(idx_file, &temp_len, sizeof(temp_len)) != sizeof(temp_len)) {
+                goto search_failed;
+            }
+            if(!storage_file_seek(idx_file, temp_len + 6, false)) {
+                goto search_failed;
             }
         }
+        storage_file_seek(idx_file, pivot_pos, true);
 
-        uint64_t record_start_pos = storage_file_tell(idx_file);
         uint16_t key_len;
-        if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) break;
+        if(storage_file_read(idx_file, &key_len, sizeof(key_len)) != sizeof(key_len)) {
+            break;
+        }
 
         char key_buffer[50];
-        if(key_len >= sizeof(key_buffer)) key_len = sizeof(key_buffer) - 1;
+        if(key_len >= sizeof(key_buffer)) {
+            key_len = sizeof(key_buffer) - 1;
+        }
 
-        if(storage_file_read(idx_file, key_buffer, key_len) != key_len) break;
+        if(storage_file_read(idx_file, key_buffer, key_len) != key_len) {
+            break;
+        }
         key_buffer[key_len] = '\0';
 
         int cmp = strcasecmp(word_to_find, key_buffer);
@@ -194,14 +182,15 @@ static bool dictionary_app_search_word(DictionaryApp* app, const char* word_to_f
             found = true;
             goto cleanup;
         } else if(cmp < 0) {
-            high = record_start_pos;
+            high = pivot_pos;
         } else {
             low = storage_file_tell(idx_file) + sizeof(uint32_t) + sizeof(uint16_t);
         }
     }
 
+search_failed:
     if(!found) {
-        furi_string_printf(app->result_text, "Word not found:\n\"%s\"", word_to_find);
+        // The result text will be set in the calling function
     }
 
 cleanup:
@@ -239,6 +228,7 @@ static DictionaryApp* dictionary_app_alloc(void) {
     // --- TextBox (Result Display) Setup ---
     app->text_box = text_box_alloc();
     view_dispatcher_add_view(app->vd, DictionaryViewResult, text_box_get_view(app->text_box));
+
     app->result_text = furi_string_alloc();
 
     view_dispatcher_attach_to_gui(app->vd, app->gui, ViewDispatcherTypeFullscreen);
